@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
@@ -205,6 +205,34 @@ async def require_api_version(x_api_version: str = Header(None)):
             status_code=400,
             detail="API version header required"
         )
+
+# Pagination Helper
+def get_paginated_response(request: Request, data: list, total: int, page: int, limit: int):
+    # Ceiling division to find total pages
+    total_pages = (total + limit - 1) // limit
+    
+    # Get the base URL
+    base_url = str(request.url).split('?')[0]
+    
+    # Helper to build the next/prev URLs
+    def make_link(p):
+        if p < 1 or p > total_pages:
+            return None
+        return f"{base_url}?page={p}&limit={limit}"
+
+    return {
+        "status": "success",
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "total_pages": total_pages,
+        "links": {
+            "self": make_link(page),
+            "next": make_link(page + 1),
+            "prev": make_link(page - 1)
+        },
+        "data": data
+    }
 
 # Global exception handler to match the required error format
 @app.exception_handler(HTTPException)
@@ -431,6 +459,7 @@ def build_profile_query(
 # Search end points
 @app.get("/api/profiles/search", dependencies=[Depends(require_api_version)])
 async def search_profiles(
+    request: Request,
     q: str = None,
     page: int = 1,
     limit: int = 10
@@ -462,18 +491,19 @@ async def search_profiles(
 
     return JSONResponse(
         status_code=200,
-        content={
-            "status": "success",
-            "page": page,
-            "limit": limit,
-            "total": total,
-            "data": [row_to_dict(r) for r in rows]
-        }
+        content=get_paginated_response(
+            request, 
+            [row_to_dict(r) for r in rows], 
+            total, 
+            page, 
+            limit
+        )
     )
 
 # Get API profiles
 @app.get("/api/profiles", dependencies=[Depends(require_api_version)])
 async def get_profiles(
+    request: Request,
     gender: str = None,
     age_group: str = None,
     country_id: str = None,
@@ -526,13 +556,13 @@ async def get_profiles(
 
     return JSONResponse(
         status_code=200,
-        content={
-            "status": "success",
-            "page": page,
-            "limit": limit,
-            "total": total,
-            "data": [row_to_dict(r) for r in rows]
-        }
+        content=get_paginated_response(
+            request, 
+            [row_to_dict(r) for r in rows], 
+            total, 
+            page, 
+            limit
+        )
     )
 
 # Get single profile end point 
