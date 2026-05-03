@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from fastapi import FastAPI, Header, HTTPException, Depends, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+import csv
+import io
 from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import os
@@ -601,3 +603,66 @@ async def delete_profile(profile_id: str):
 
     return Response(status_code=204)
 
+# CSV Export Endpoint
+@app.get("/api/profiles/export", dependencies=[Depends(require_api_version)])
+async def export_profiles_csv(
+    format: str = None,
+    gender: str = None,
+    age_group: str = None,
+    country_id: str = None,
+    min_age: int = None,
+    max_age: int = None,
+    min_gender_probability: float = None,
+    min_country_probability: float = None,
+    sort_by: str = "created_at",
+    order: str = "asc"
+):
+    if format != "csv":
+        return error("Invalid format. Only format=csv is supported.", 400)
+        
+    # Exports filtered profiles as a CSV file.
+    # Uses the same filtering logic as the list endpoint but without pagination.
+    # Reuse our query builder logic
+    count_q, data_q, params = build_profile_query(
+        gender, age_group, country_id, min_age, max_age,
+        min_gender_probability, min_country_probability, sort_by, order
+    )
+
+    # Remove pagination from the query string (LIMIT and OFFSET)
+    # We want ALL matching records for an export
+    export_q = data_q.split("LIMIT")[0]
+
+    conn = get_db()
+    rows = conn.execute(export_q, params).fetchall()
+    conn.close()
+
+    # Create an in-memory string buffer for the CSV data
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Write CSV Header
+    writer.writerow([
+        "id", "name", "gender", "gender_probability", "age", 
+        "age_group", "country_id", "country_name", 
+        "country_probability", "created_at"
+    ])
+
+    # Write Data Rows
+    for row in rows:
+        writer.writerow([
+            row["id"], row["name"], row["gender"], row["gender_probability"],
+            row["age"], row["age_group"], row["country_id"], row["country_name"],
+            row["country_probability"], row["created_at"]
+        ])
+
+    # Move to the beginning of the buffer so we can read it
+    output.seek(0)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"profiles_{timestamp}.csv"
+
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
