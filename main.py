@@ -402,6 +402,52 @@ async def github_callback(code: str = None, state: str = None):
         }
     )
 
+# Refresh access token endpoint
+@app.post("/auth/refresh")
+async def refresh_access_token(body: dict):
+    # Extract refresh token from request body
+    refresh_token = body.get("refresh_token")
+    if not refresh_token:
+        return error("Missing refresh token", 400)
+
+    try:
+        # Decode and validate refresh token
+        payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        # Verify token type
+        if payload.get("type") != "refresh":
+            return error("Invalid token type", 401)
+
+        user_id = payload.get("sub")
+        
+        # Fetch user from database to verify status and role
+        conn = get_db()
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        
+        if not user or not user["is_active"]:
+            conn.close()
+            return error("User not found or inactive", 401)
+
+        # Generate new tokens
+        new_access = create_access_token(user_id, user["role"])
+        new_refresh = create_refresh_token(user_id)
+        
+        conn.close()
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "access_token": new_access,
+                "refresh_token": new_refresh
+            }
+        )
+
+    except JWTError:
+        # Handle expired or tampered tokens
+        return error("Invalid or expired refresh token", 401)
+
+
 
 # Global exception handler to match the required error format
 @app.exception_handler(HTTPException)
