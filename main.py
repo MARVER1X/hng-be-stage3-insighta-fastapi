@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
@@ -198,8 +198,27 @@ def error(message: str, code: int):
         }
     )
 
+# API Versioning Dependency
+async def require_api_version(x_api_version: str = Header(None)):
+    if x_api_version != "1":
+        raise HTTPException(
+            status_code=400,
+            detail="API version header required"
+        )
+
+# Global exception handler to match the required error format
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "status": "error",
+            "message": exc.detail
+        }
+    )
+
 # Create profile end point
-@app.post("/api/profiles")
+@app.post("/api/profiles", dependencies=[Depends(require_api_version)])
 async def create_profile(body: dict):
     # Name is extracted to enable validation.
     name = body.get("name")
@@ -410,7 +429,7 @@ def build_profile_query(
     return count_q, data_q, params
 
 # Search end points
-@app.get("/api/profiles/search")
+@app.get("/api/profiles/search", dependencies=[Depends(require_api_version)])
 async def search_profiles(
     q: str = None,
     page: int = 1,
@@ -453,7 +472,7 @@ async def search_profiles(
     )
 
 # Get API profiles
-@app.get("/api/profiles")
+@app.get("/api/profiles", dependencies=[Depends(require_api_version)])
 async def get_profiles(
     gender: str = None,
     age_group: str = None,
@@ -517,7 +536,7 @@ async def get_profiles(
     )
 
 # Get single profile end point 
-@app.get("/api/profiles/{profile_id}")
+@app.get("/api/profiles/{profile_id}", dependencies=[Depends(require_api_version)])
 async def get_profile(profile_id: str):
     conn = get_db()
     row = conn.execute(
@@ -535,7 +554,7 @@ async def get_profile(profile_id: str):
     )
 
 # Delete profile end point
-@app.delete("/api/profiles/{profile_id}")
+@app.delete("/api/profiles/{profile_id}", dependencies=[Depends(require_api_version)])
 async def delete_profile(profile_id: str):
     conn = get_db()
 
