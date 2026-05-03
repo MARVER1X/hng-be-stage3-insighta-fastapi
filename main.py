@@ -1,6 +1,7 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import asyncio
 from fastapi import FastAPI, Header, HTTPException, Depends, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse, RedirectResponse
 import csv
 import io
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,21 @@ import os
 import time
 import re
 import httpx
+import secrets
+import hashlib
+import base64
+from jose import jwt, JWTError
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
+
+# App Secrets
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+GITHUB_REDIRECT_URI = os.getenv("GITHUB_REDIRECT_URI")
+JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 app = FastAPI(title="Insighta Labs API")
 
@@ -235,6 +251,157 @@ def get_paginated_response(request: Request, data: list, total: int, page: int, 
         },
         "data": data
     }
+
+# AUTHENTICATION & SECURITY
+
+# Temporary in-memory store for PKCE verifiers.
+pkce_store = {}
+
+def create_access_token(user_id: str, role: str) -> str:
+    # Creates a short-lived VIP Pass (3 minutes)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=3)
+    payload = {"sub": user_id, "role": role, "type": "access", "exp": expire}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def create_refresh_token(user_id: str) -> str:
+    # Creates a longer-lived Renewal Voucher (5 minutes)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=5)
+    payload = {"sub": user_id, "type": "refresh", "exp": expire}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+@app.get("/auth/github")
+async def github_login():
+    # Generate puzzle(code_challenge and code_verifier) for GitHub OAuth
+    state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    
+    # Create 'code_challenge' using SHA-256
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+    # Store the verifier for validation
+    pkce_store[state] = code_verifier
+
+    github_url = (
+        f"https://github.com/login/oauth/authorize"
+        f"?client_id={GITHUB_CLIENT_ID}"
+        f"&redirect_uri={GITHUB_REDIRECT_URI}"
+        f"&state={state}"
+        f"&code_challenge={code_challenge}"
+        f"&code_challenge_method=S256"
+        f"&scope=read:user user:email"
+    )
+    return RedirectResponse(github_url)
+
+@app.get("/auth/github/callback")
+async def github_callback(code: str = None, state: str = None):
+    if not code or not state:
+        return error("Missing code or state", 400)
+
+    code_verifier = pkce_store.pop(state, None)
+    if not code_verifier:
+        return error("Invalid or expired state", 400)
+
+    # Use a retry loop for network calls to GitHub
+    max_retries = 3
+    gh_access_token = None
+    gh_user = None
+    primary_email = None
+
+    async with httpx.AsyncClient() as client:
+        for attempt in range(max_retries):
+            try:
+                # Exchange Code for Access Token
+                token_res = await client.post(
+                    "https://github.com/login/oauth/access_token",
+                    json={
+                        "client_id": GITHUB_CLIENT_ID,
+                        "client_secret": GITHUB_CLIENT_SECRET,
+                        "code": code,
+                        "redirect_uri": GITHUB_REDIRECT_URI,
+                        "code_verifier": code_verifier,
+                    },
+                    headers={"Accept": "application/json"},
+                    timeout=10.0
+                )
+                token_res.raise_for_status()
+                gh_access_token = token_res.json().get("access_token")
+                
+                if not gh_access_token:
+                    return error("GitHub did not return an access token", 401)
+
+                # Get User Profile
+                user_res = await client.get(
+                    "https://api.github.com/user",
+                    headers={"Authorization": f"Bearer {gh_access_token}"},
+                    timeout=10.0
+                )
+                user_res.raise_for_status()
+                gh_user = user_res.json()
+
+                # Get User Emails
+                emails_res = await client.get(
+                    "https://api.github.com/user/emails",
+                    headers={"Authorization": f"Bearer {gh_access_token}"},
+                    timeout=10.0
+                )
+                emails_res.raise_for_status()
+                emails = emails_res.json()
+                primary_email = next((e["email"] for e in emails if e["primary"]), None)
+                
+                # End loop if all 3 calls succeeded!
+                break
+
+            except httpx.HTTPStatusError as e:
+                # Something was wrong with the request (e.g. 401 Unauthorized)
+                return error(f"GitHub identity verification failed: {str(e)}", 401)
+            except (httpx.RequestError, httpx.TimeoutException) as e:
+                # Network issues (connection lost, timeout, DNS failure)
+                if attempt == max_retries - 1:
+                    return error(f"Network error talking to GitHub after {max_retries} attempts: {str(e)}", 503)
+                await asyncio.sleep(1) # Wait 1 second before retrying
+                continue
+
+    github_id = str(gh_user["id"])
+    username = gh_user["login"]
+    avatar_url = gh_user.get("avatar_url", "")
+    
+    # Check if they exist in database
+    conn = get_db()
+    existing_user = conn.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
+    
+    if existing_user:
+        user_id = existing_user["id"]
+        role = existing_user["role"]
+        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (utc_now(), user_id))
+    else:
+        user_id = generate_uuid_v7()
+        role = "analyst"  # Default role
+        conn.execute("""
+            INSERT INTO users (id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """, (user_id, github_id, username, primary_email, avatar_url, role, utc_now(), utc_now()))
+    
+    # Generate internal JWT tokens
+    access_token = create_access_token(user_id, role)
+    refresh_token = create_refresh_token(user_id)
+    
+    conn.commit()
+    conn.close()
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "success",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user": {
+                "username": username,
+                "role": role
+            }
+        }
+    )
+
 
 # Global exception handler to match the required error format
 @app.exception_handler(HTTPException)
