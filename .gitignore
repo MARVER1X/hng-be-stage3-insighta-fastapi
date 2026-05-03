@@ -1,0 +1,17 @@
+# Python bytecode (compiled files)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments 
+.venv/
+env/
+venv/
+ENV/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Personal/Sensitive Data
+.env
