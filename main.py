@@ -449,6 +449,26 @@ async def refresh_access_token(body: dict):
 
 
 
+# Extract user from token
+async def get_current_user(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    
+    token = authorization.split(" ")[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token")
+
+# Check if user is an admin
+async def require_admin(current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden: Admins only")
+    return current_user
+
 # Global exception handler to match the required error format
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
@@ -461,7 +481,7 @@ async def http_exception_handler(request, exc):
     )
 
 # Create profile end point
-@app.post("/api/profiles", dependencies=[Depends(require_api_version)])
+@app.post("/api/profiles", dependencies=[Depends(require_api_version), Depends(require_admin)])
 async def create_profile(body: dict):
     # Name is extracted to enable validation.
     name = body.get("name")
@@ -672,7 +692,7 @@ def build_profile_query(
     return count_q, data_q, params
 
 # Search end points
-@app.get("/api/profiles/search", dependencies=[Depends(require_api_version)])
+@app.get("/api/profiles/search", dependencies=[Depends(require_api_version), Depends(get_current_user)])
 async def search_profiles(
     request: Request,
     q: str = None,
@@ -716,7 +736,7 @@ async def search_profiles(
     )
 
 # Get API profiles
-@app.get("/api/profiles", dependencies=[Depends(require_api_version)])
+@app.get("/api/profiles", dependencies=[Depends(require_api_version), Depends(get_current_user)])
 async def get_profiles(
     request: Request,
     gender: str = None,
@@ -781,7 +801,7 @@ async def get_profiles(
     )
 
 # Get single profile end point 
-@app.get("/api/profiles/{profile_id}", dependencies=[Depends(require_api_version)])
+@app.get("/api/profiles/{profile_id}", dependencies=[Depends(require_api_version), Depends(get_current_user)])
 async def get_profile(profile_id: str):
     conn = get_db()
     row = conn.execute(
@@ -799,7 +819,7 @@ async def get_profile(profile_id: str):
     )
 
 # Delete profile end point
-@app.delete("/api/profiles/{profile_id}", dependencies=[Depends(require_api_version)])
+@app.delete("/api/profiles/{profile_id}", dependencies=[Depends(require_api_version), Depends(require_admin)])
 async def delete_profile(profile_id: str):
     conn = get_db()
 
@@ -817,7 +837,7 @@ async def delete_profile(profile_id: str):
     return Response(status_code=204)
 
 # CSV Export Endpoint
-@app.get("/api/profiles/export", dependencies=[Depends(require_api_version)])
+@app.get("/api/profiles/export", dependencies=[Depends(require_api_version), Depends(get_current_user)])
 async def export_profiles_csv(
     format: str = None,
     gender: str = None,
