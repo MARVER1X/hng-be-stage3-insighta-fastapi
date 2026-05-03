@@ -17,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = "profiles.db"
+DB_PATH = "insighta.db"
 
 # Country name → ISO 2-letter code mapping (for NLP parser)
 COUNTRY_NAME_TO_ID = {
@@ -149,6 +149,20 @@ def init_db():
             country_id TEXT,
             country_name TEXT,
             country_probability REAL,
+            created_at TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            github_id TEXT UNIQUE NOT NULL,
+            username TEXT,
+            email TEXT,
+            avatar_url TEXT,
+            role TEXT DEFAULT 'analyst',
+            is_active BOOLEAN DEFAULT 1,
+            last_login_at TEXT,
             created_at TEXT
         )
     """)
