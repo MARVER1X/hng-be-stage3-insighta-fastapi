@@ -3,3 +3,4 @@ uvicorn
 httpx
 python-jose[cryptography]
 python-dotenv
+slowapi

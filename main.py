@@ -15,6 +15,10 @@ import hashlib
 import base64
 from jose import jwt, JWTError
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import logging
 
 # Load environment variables from .env
 load_dotenv()
@@ -27,6 +31,36 @@ JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 app = FastAPI(title="Insighta Labs API")
+
+# Rate Limiter is initialized
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Structured Logging Setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("insighta")
+
+# Request Logging Middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    # Stopwatch is started
+    start_time = time.time()
+    
+    # Request is processed by downstream routes
+    response = await call_next(request)
+    
+    # Duration is calculated in milliseconds
+    duration = (time.time() - start_time) * 1000
+    
+    # Audit log entry: [METHOD] [PATH] [STATUS] [DURATION]ms
+    logger.info(
+        f"{request.method} {request.url.path} | "
+        f"Status: {response.status_code} | "
+        f"Duration: {duration:.2f}ms"
+    )
+    
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -278,7 +312,8 @@ def create_refresh_token(user_id: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 @app.get("/auth/github")
-async def github_login(state: str = None, code_challenge: str = None):
+@limiter.limit("10/minute")
+async def github_login(request: Request, state: str = None, code_challenge: str = None):
     if not state or not code_challenge:
         # PKCE keys are generated for web flow
         state = secrets.token_urlsafe(32)
@@ -303,7 +338,8 @@ async def github_login(state: str = None, code_challenge: str = None):
     return RedirectResponse(github_url)
 
 @app.get("/auth/github/callback")
-async def github_callback(code: str = None, state: str = None, code_verifier: str = None, redirect_uri: str = None):
+@limiter.limit("10/minute")
+async def github_callback(request: Request, code: str = None, state: str = None, code_verifier: str = None, redirect_uri: str = None):
     if not code or not state:
         return error("Missing code or state", 400)
 
@@ -430,7 +466,8 @@ async def github_callback(code: str = None, state: str = None, code_verifier: st
 
 # Refresh access token endpoint
 @app.post("/auth/refresh")
-async def refresh_access_token(body: dict):
+@limiter.limit("10/minute")
+async def refresh_access_token(request: Request, body: dict):
     # Refresh token is extracted from request body
     refresh_token = body.get("refresh_token")
     if not refresh_token:
@@ -490,7 +527,8 @@ async def refresh_access_token(body: dict):
 
 # Logout endpoint
 @app.post("/auth/logout")
-async def logout(body: dict):
+@limiter.limit("10/minute")
+async def logout(request: Request, body: dict):
     refresh_token = body.get("refresh_token")
     if not refresh_token:
         return error("Missing refresh token", 400)
@@ -551,7 +589,8 @@ async def http_exception_handler(request, exc):
 
 # Create profile end point
 @app.post("/api/profiles", dependencies=[Depends(require_api_version), Depends(require_admin)])
-async def create_profile(body: dict):
+@limiter.limit("60/minute")
+async def create_profile(request: Request, body: dict):
     # Name is extracted to enable validation.
     name = body.get("name")
 
@@ -762,6 +801,7 @@ def build_profile_query(
 
 # Search end points
 @app.get("/api/profiles/search", dependencies=[Depends(require_api_version), Depends(get_current_user)])
+@limiter.limit("60/minute")
 async def search_profiles(
     request: Request,
     q: str = None,
@@ -806,7 +846,9 @@ async def search_profiles(
 
 # CSV Export Endpoint
 @app.get("/api/profiles/export", dependencies=[Depends(require_api_version), Depends(get_current_user)])
+@limiter.limit("60/minute")
 async def export_profiles_csv(
+    request: Request,
     format: str = None,
     gender: str = None,
     age_group: str = None,
@@ -866,6 +908,7 @@ async def export_profiles_csv(
 
 # Get API profiles
 @app.get("/api/profiles", dependencies=[Depends(require_api_version), Depends(get_current_user)])
+@limiter.limit("60/minute")
 async def get_profiles(
     request: Request,
     gender: str = None,
@@ -931,7 +974,8 @@ async def get_profiles(
 
 # Get single profile end point 
 @app.get("/api/profiles/{profile_id}", dependencies=[Depends(require_api_version), Depends(get_current_user)])
-async def get_profile(profile_id: str):
+@limiter.limit("60/minute")
+async def get_profile(request: Request, profile_id: str):
     conn = get_db()
     row = conn.execute(
         "SELECT * FROM profiles WHERE id = ?",
@@ -949,7 +993,8 @@ async def get_profile(profile_id: str):
 
 # Delete profile end point
 @app.delete("/api/profiles/{profile_id}", dependencies=[Depends(require_api_version), Depends(require_admin)])
-async def delete_profile(profile_id: str):
+@limiter.limit("60/minute")
+async def delete_profile(request: Request, profile_id: str):
     conn = get_db()
 
     result = conn.execute(
