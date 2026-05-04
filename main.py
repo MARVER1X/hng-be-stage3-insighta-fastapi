@@ -185,6 +185,14 @@ def init_db():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS revoked_tokens (
+            id TEXT PRIMARY KEY,
+            token TEXT UNIQUE NOT NULL,
+            revoked_at TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -410,18 +418,26 @@ async def refresh_access_token(body: dict):
     if not refresh_token:
         return error("Missing refresh token", 400)
 
+    conn = get_db()
+    
+    # Check if the token has been revoked or already used
+    revoked = conn.execute("SELECT * FROM revoked_tokens WHERE token = ?", (refresh_token,)).fetchone()
+    if revoked:
+        conn.close()
+        return error("Refresh token has been revoked or already used", 401)
+
     try:
         # Decode and validate refresh token
         payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         
         # Verify token type
         if payload.get("type") != "refresh":
+            conn.close()
             return error("Invalid token type", 401)
 
         user_id = payload.get("sub")
         
         # Fetch user from database to verify status and role
-        conn = get_db()
         user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         
         if not user or not user["is_active"]:
@@ -432,6 +448,12 @@ async def refresh_access_token(body: dict):
         new_access = create_access_token(user_id, user["role"])
         new_refresh = create_refresh_token(user_id)
         
+        # Invalidate the old refresh token immediately
+        conn.execute(
+            "INSERT INTO revoked_tokens (id, token, revoked_at) VALUES (?, ?, ?)", 
+            (generate_uuid_v7(), refresh_token, utc_now())
+        )
+        conn.commit()
         conn.close()
 
         return JSONResponse(
@@ -444,10 +466,39 @@ async def refresh_access_token(body: dict):
         )
 
     except JWTError:
-        # Handle expired or tampered tokens
+        if 'conn' in locals():
+            conn.close()
         return error("Invalid or expired refresh token", 401)
 
+# Logout endpoint
+@app.post("/auth/logout")
+async def logout(body: dict):
+    refresh_token = body.get("refresh_token")
+    if not refresh_token:
+        return error("Missing refresh token", 400)
 
+    try:
+        # Decode to verify it is a valid token before blacklisting
+        payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        if payload.get("type") != "refresh":
+            return error("Invalid token type", 401)
+            
+        conn = get_db()
+        # Add to graveyard
+        conn.execute(
+            "INSERT OR IGNORE INTO revoked_tokens (id, token, revoked_at) VALUES (?, ?, ?)", 
+            (generate_uuid_v7(), refresh_token, utc_now())
+        )
+        conn.commit()
+        conn.close()
+        
+        return JSONResponse(
+            status_code=200,
+            content={"status": "success", "message": "Logged out successfully"}
+        )
+    except JWTError:
+        return error("Invalid or expired refresh token", 401)
 
 # Extract user from token
 async def get_current_user(authorization: str = Header(None)):
