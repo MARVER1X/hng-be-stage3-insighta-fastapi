@@ -15,3 +15,5 @@ Thumbs.db
 
 # Personal/Sensitive Data
 .env
+generate_test_tokens.py
+insighta_postman_collection.json
