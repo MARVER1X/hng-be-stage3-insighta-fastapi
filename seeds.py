@@ -28,7 +28,7 @@ def utc_now() -> str:
 
 
 def seed(filename: str, db_path: str = "profiles.db"):
-    # Load JSON
+    # JSON is loaded
     try:
         with open(filename, "r", encoding="utf-8") as f:
             profiles = json.load(f)
@@ -41,7 +41,7 @@ def seed(filename: str, db_path: str = "profiles.db"):
         sys.exit(1)
 
     if isinstance(profiles, dict):
-        # Find the first list value in the dict
+        # First list value is found in the dict
         list_candidates = [v for v in profiles.values() if isinstance(v, list)]
 
         if len(list_candidates) == 1:
@@ -54,11 +54,11 @@ def seed(filename: str, db_path: str = "profiles.db"):
         print("Error: Expected a JSON array at the top level.")
         sys.exit(1)
 
-    # Connect
+    # Database connection is established
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    # Ensure table exists with correct schema
+    # Table existence is ensured with correct schema
     conn.execute("""
         CREATE TABLE IF NOT EXISTS profiles (
             id                  TEXT PRIMARY KEY,
@@ -84,7 +84,7 @@ def seed(filename: str, db_path: str = "profiles.db"):
             errors += 1
             continue
 
-        # Skip if name already exists (idempotent)
+        # Name duplication is skipped
         existing = conn.execute(
             "SELECT id FROM profiles WHERE name = ?", (name,)
         ).fetchone()
@@ -117,7 +117,7 @@ def seed(filename: str, db_path: str = "profiles.db"):
             print(f"  Row {i}: Error — {e}")
             errors += 1
 
-        # Commit in batches of 100 for performance
+        # Commits are batched by 100 for performance
         if inserted % 100 == 0 and inserted > 0:
             conn.commit()
             print(f"  Progress: {inserted} inserted...")

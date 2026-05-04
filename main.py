@@ -278,17 +278,18 @@ def create_refresh_token(user_id: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 @app.get("/auth/github")
-async def github_login():
-    # Generate puzzle(code_challenge and code_verifier) for GitHub OAuth
-    state = secrets.token_urlsafe(32)
-    code_verifier = secrets.token_urlsafe(64)
-    
-    # Create 'code_challenge' using SHA-256
-    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+async def github_login(state: str = None, code_challenge: str = None):
+    if not state or not code_challenge:
+        # PKCE keys are generated for web flow
+        state = secrets.token_urlsafe(32)
+        code_verifier = secrets.token_urlsafe(64)
+        
+        # 'code_challenge' is created using SHA-256
+        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+        code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
-    # Store the verifier for validation
-    pkce_store[state] = code_verifier
+        # Verifier is stored for validation
+        pkce_store[state] = code_verifier
 
     github_url = (
         f"https://github.com/login/oauth/authorize"
@@ -302,15 +303,32 @@ async def github_login():
     return RedirectResponse(github_url)
 
 @app.get("/auth/github/callback")
-async def github_callback(code: str = None, state: str = None):
+async def github_callback(code: str = None, state: str = None, code_verifier: str = None, redirect_uri: str = None):
     if not code or not state:
         return error("Missing code or state", 400)
 
-    code_verifier = pkce_store.pop(state, None)
-    if not code_verifier:
+    # CLI Proxy Logic: Handled if this is the initial redirect from GitHub for a CLI login
+    if state.startswith("cli_") and not code_verifier:
+        parts = state.split("_")
+        if len(parts) >= 2:
+            cli_port = parts[1]
+            # Browser is bounced back to CLI local server
+            return RedirectResponse(f"http://localhost:{cli_port}/callback?code={code}&state={state}")
+
+    # PKCE verifier and redirect URI are determined
+    if code_verifier:
+        # Final exchange request is received from CLI
+        final_code_verifier = code_verifier
+        final_redirect_uri = redirect_uri or GITHUB_REDIRECT_URI
+    else:
+        # Standard login is performed by Web App
+        final_code_verifier = pkce_store.pop(state, None)
+        final_redirect_uri = GITHUB_REDIRECT_URI
+
+    if not final_code_verifier:
         return error("Invalid or expired state", 400)
 
-    # Use a retry loop for network calls to GitHub
+    # Retry loop is used for network calls to GitHub
     max_retries = 3
     gh_access_token = None
     gh_user = None
@@ -319,15 +337,15 @@ async def github_callback(code: str = None, state: str = None):
     async with httpx.AsyncClient() as client:
         for attempt in range(max_retries):
             try:
-                # Exchange Code for Access Token
+                # Code is exchanged for Access Token
                 token_res = await client.post(
                     "https://github.com/login/oauth/access_token",
                     json={
                         "client_id": GITHUB_CLIENT_ID,
                         "client_secret": GITHUB_CLIENT_SECRET,
                         "code": code,
-                        "redirect_uri": GITHUB_REDIRECT_URI,
-                        "code_verifier": code_verifier,
+                        "redirect_uri": final_redirect_uri,
+                        "code_verifier": final_code_verifier,
                     },
                     headers={"Accept": "application/json"},
                     timeout=10.0
@@ -338,7 +356,7 @@ async def github_callback(code: str = None, state: str = None):
                 if not gh_access_token:
                     return error("GitHub did not return an access token", 401)
 
-                # Get User Profile
+                # User profile is fetched
                 user_res = await client.get(
                     "https://api.github.com/user",
                     headers={"Authorization": f"Bearer {gh_access_token}"},
@@ -347,7 +365,7 @@ async def github_callback(code: str = None, state: str = None):
                 user_res.raise_for_status()
                 gh_user = user_res.json()
 
-                # Get User Emails
+                # User emails are fetched
                 emails_res = await client.get(
                     "https://api.github.com/user/emails",
                     headers={"Authorization": f"Bearer {gh_access_token}"},
@@ -357,14 +375,14 @@ async def github_callback(code: str = None, state: str = None):
                 emails = emails_res.json()
                 primary_email = next((e["email"] for e in emails if e["primary"]), None)
                 
-                # End loop if all 3 calls succeeded!
+                # Loop is ended if all calls succeeded
                 break
 
             except httpx.HTTPStatusError as e:
-                # Something was wrong with the request (e.g. 401 Unauthorized)
+                # Request error occurred (e.g. 401 Unauthorized)
                 return error(f"GitHub identity verification failed: {str(e)}", 401)
             except (httpx.RequestError, httpx.TimeoutException) as e:
-                # Network issues (connection lost, timeout, DNS failure)
+                # Network issues occurred (connection lost, timeout, DNS failure)
                 if attempt == max_retries - 1:
                     return error(f"Network error talking to GitHub after {max_retries} attempts: {str(e)}", 503)
                 await asyncio.sleep(1) # Wait 1 second before retrying
@@ -374,7 +392,7 @@ async def github_callback(code: str = None, state: str = None):
     username = gh_user["login"]
     avatar_url = gh_user.get("avatar_url", "")
     
-    # Check if they exist in database
+    # User existence is checked in database
     conn = get_db()
     existing_user = conn.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
     
@@ -390,7 +408,7 @@ async def github_callback(code: str = None, state: str = None):
             VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
         """, (user_id, github_id, username, primary_email, avatar_url, role, utc_now(), utc_now()))
     
-    # Generate internal JWT tokens
+    # Internal JWT tokens are generated
     access_token = create_access_token(user_id, role)
     refresh_token = create_refresh_token(user_id)
     
@@ -413,42 +431,42 @@ async def github_callback(code: str = None, state: str = None):
 # Refresh access token endpoint
 @app.post("/auth/refresh")
 async def refresh_access_token(body: dict):
-    # Extract refresh token from request body
+    # Refresh token is extracted from request body
     refresh_token = body.get("refresh_token")
     if not refresh_token:
         return error("Missing refresh token", 400)
 
     conn = get_db()
     
-    # Check if the token has been revoked or already used
+    # Token revocation or prior usage is checked
     revoked = conn.execute("SELECT * FROM revoked_tokens WHERE token = ?", (refresh_token,)).fetchone()
     if revoked:
         conn.close()
         return error("Refresh token has been revoked or already used", 401)
 
     try:
-        # Decode and validate refresh token
+        # Refresh token is decoded and validated
         payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         
-        # Verify token type
+        # Token type is verified
         if payload.get("type") != "refresh":
             conn.close()
             return error("Invalid token type", 401)
 
         user_id = payload.get("sub")
         
-        # Fetch user from database to verify status and role
+        # User is fetched from database to verify status and role
         user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         
         if not user or not user["is_active"]:
             conn.close()
             return error("User not found or inactive", 401)
 
-        # Generate new tokens
+        # New tokens are generated
         new_access = create_access_token(user_id, user["role"])
         new_refresh = create_refresh_token(user_id)
         
-        # Invalidate the old refresh token immediately
+        # Old refresh token is invalidated immediately
         conn.execute(
             "INSERT INTO revoked_tokens (id, token, revoked_at) VALUES (?, ?, ?)", 
             (generate_uuid_v7(), refresh_token, utc_now())
@@ -478,14 +496,14 @@ async def logout(body: dict):
         return error("Missing refresh token", 400)
 
     try:
-        # Decode to verify it is a valid token before blacklisting
+        # Token is decoded to verify validity before blacklisting
         payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         
         if payload.get("type") != "refresh":
             return error("Invalid token type", 401)
             
         conn = get_db()
-        # Add to graveyard
+        # Token is added to revoked list
         conn.execute(
             "INSERT OR IGNORE INTO revoked_tokens (id, token, revoked_at) VALUES (?, ?, ?)", 
             (generate_uuid_v7(), refresh_token, utc_now())
@@ -500,7 +518,7 @@ async def logout(body: dict):
     except JWTError:
         return error("Invalid or expired refresh token", 401)
 
-# Extract user from token
+# User is extracted from token
 async def get_current_user(authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
@@ -514,13 +532,13 @@ async def get_current_user(authorization: str = Header(None)):
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired access token")
 
-# Check if user is an admin
+# User admin status is checked
 async def require_admin(current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden: Admins only")
     return current_user
 
-# Global exception handler to match the required error format
+# Global exception handler is used to match required error format
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     return JSONResponse(
@@ -637,7 +655,7 @@ def parse_natural_language_query(q: str):
     q_lower = q.lower()
     tokens = set(q_lower.split())
 
-    # Gender (handle both case properly)
+    # Gender is handled for both cases properly
     male_words = {"male", "males", "man", "men", "boy", "boys"}
     female_words = {"female", "females", "woman", "women", "girl", "girls"}
 
@@ -649,7 +667,7 @@ def parse_natural_language_query(q: str):
     elif has_female and not has_male:
         filters["gender"] = "female"
 
-    # Age groups
+    # Age groups are evaluated
     if bool(tokens & {"child", "children", "kids"}):
         filters["age_group"] = "child"
     elif bool(tokens & {"teens","teenager", "teenagers"}):
@@ -673,7 +691,7 @@ def parse_natural_language_query(q: str):
     if below:
         filters["max_age"] = int(below.group(2))
 
-    # Country (simple match)
+    # Country is matched
     for name, code in sorted(COUNTRY_NAME_TO_ID.items(), key=lambda x: -len(x[0])):
         if name in q_lower:
             filters["country_id"] = code
@@ -753,7 +771,7 @@ async def search_profiles(
     if not q or q.strip() == "":
         return error("Missing query parameter", 400)
     
-    # Validate pagination
+    # Pagination is validated
     if page < 1 or limit < 1 or limit > 50:
         return error("Invalid query parameters", 400)
 
@@ -803,28 +821,28 @@ async def export_profiles_csv(
     if format != "csv":
         return error("Invalid format. Only format=csv is supported.", 400)
         
-    # Exports filtered profiles as a CSV file.
-    # Uses the same filtering logic as the list endpoint but without pagination.
+    # Filtered profiles are exported as a CSV file.
+    # Same filtering logic as list endpoint is used without pagination.
     count_q, data_q, params = build_profile_query(
         gender, age_group, country_id, min_age, max_age,
         min_gender_probability, min_country_probability, sort_by, order
     )
 
-    # Removing the limits
+    # Limits are removed
     data_q = data_q.split("LIMIT")[0]
     
     conn = get_db()
     
-    # Do not append LIMIT/OFFSET here because we want all matching rows
+    # LIMIT/OFFSET is excluded to fetch all matching rows
     rows = conn.execute(data_q, params).fetchall()
     conn.close()
 
     if not rows:
         return error("No profiles match the given criteria", 404)
 
-    # Use a StringIO buffer to write CSV data in memory
+    # StringIO buffer is used to write CSV data in memory
     output = io.StringIO()
-    # Define columns to export
+    # Columns to export are defined
     fieldnames = [
         "id", "name", "gender", "gender_probability", "age", "age_group",
         "country_id", "country_name", "country_probability", "created_at"
@@ -843,7 +861,7 @@ async def export_profiles_csv(
         "Content-Disposition": f'attachment; filename="profiles_{timestamp}.csv"'
     }
 
-    # Stream the response with the required content type
+    # Response is streamed with required content type
     return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers=headers)
 
 # Get API profiles
@@ -862,16 +880,16 @@ async def get_profiles(
     page: int = 1,
     limit: int = 10
 ):
-    # Validate sort_by
+    # Sort parameter is validated
     valid_sort = {"age", "created_at", "gender_probability"}
     if sort_by not in valid_sort:
         return error("Invalid query parameters", 400)
 
-    # Validate order
+    # Order parameter is validated
     if order.lower() not in {"asc", "desc"}:
         return error("Invalid query parameters", 400)
 
-    # Validate pagination
+    # Pagination is validated
     if page < 1:
         return error("Invalid query parameters", 400)
 
