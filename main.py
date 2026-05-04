@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import asyncio
-from fastapi import FastAPI, Header, HTTPException, Depends, Request
+from fastapi import FastAPI, Header, HTTPException, Depends, Request, Cookie
 from fastapi.responses import JSONResponse, Response, StreamingResponse, RedirectResponse
 import csv
 import io
@@ -451,7 +451,8 @@ async def github_callback(request: Request, code: str = None, state: str = None,
     conn.commit()
     conn.close()
 
-    return JSONResponse(
+    # Response is prepared with JSON body (for CLI) and HTTP-only cookies (for Web)
+    response = JSONResponse(
         status_code=200,
         content={
             "status": "success",
@@ -463,6 +464,28 @@ async def github_callback(request: Request, code: str = None, state: str = None,
             }
         }
     )
+    
+    # Access token is stored in a secure, HTTP-only cookie for the Web Portal
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=False,  # Should be True in production (HTTPS)
+        samesite="lax",
+        max_age=180    # 3 minutes
+    )
+    
+    # Refresh token is stored in a secure, HTTP-only cookie for the Web Portal
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=False,  # Should be True in production (HTTPS)
+        samesite="lax",
+        max_age=300    # 5 minutes
+    )
+    
+    return response
 
 # Refresh access token endpoint
 @app.post("/auth/refresh")
@@ -511,7 +534,8 @@ async def refresh_access_token(request: Request, body: dict):
         conn.commit()
         conn.close()
 
-        return JSONResponse(
+        # New tokens are returned in JSON and set as secure cookies
+        response = JSONResponse(
             status_code=200,
             content={
                 "status": "success",
@@ -519,6 +543,26 @@ async def refresh_access_token(request: Request, body: dict):
                 "refresh_token": new_refresh
             }
         )
+        
+        response.set_cookie(
+            key="access_token",
+            value=new_access,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            max_age=180
+        )
+        
+        response.set_cookie(
+            key="refresh_token",
+            value=new_refresh,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            max_age=300
+        )
+        
+        return response
 
     except JWTError:
         if 'conn' in locals():
@@ -549,19 +593,36 @@ async def logout(request: Request, body: dict):
         conn.commit()
         conn.close()
         
-        return JSONResponse(
+        # Success response is prepared and cookies are cleared
+        response = JSONResponse(
             status_code=200,
             content={"status": "success", "message": "Logged out successfully"}
         )
+        
+        # Cookies are deleted by setting them to empty with immediate expiry
+        response.delete_cookie("access_token")
+        response.delete_cookie("refresh_token")
+        
+        return response
     except JWTError:
         return error("Invalid or expired refresh token", 401)
 
-# User is extracted from token
-async def get_current_user(authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid token")
+# User is extracted from token (supports Header or Cookie)
+async def get_current_user(
+    authorization: str = Header(None),
+    access_token: str = Cookie(None)
+):
+    token = None
     
-    token = authorization.split(" ")[1]
+    # Header is checked first (CLI flow)
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+    # Cookie is checked as fallback (Web flow)
+    elif access_token:
+        token = access_token
+        
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
