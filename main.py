@@ -487,6 +487,12 @@ async def github_callback(request: Request, code: str = None, state: str = None,
     
     return response
 
+# Identity check endpoint
+@app.get("/auth/me")
+@limiter.limit("60/minute")
+async def get_me(request: Request, current_user: dict = Depends(get_current_user)):
+    return {"status": "success", "data": current_user}
+
 # Refresh access token endpoint
 @app.post("/auth/refresh")
 @limiter.limit("10/minute")
