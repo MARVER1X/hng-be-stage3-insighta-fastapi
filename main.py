@@ -43,6 +43,11 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Standardize HTTPException to match our custom error format
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return error(exc.detail, exc.status_code)
+
 # Structured Logging Setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("insighta")
