@@ -64,7 +64,8 @@ async def log_requests(request: Request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -271,28 +272,38 @@ def get_paginated_response(request: Request, data: list, total: int, page: int, 
     # Ceiling division to find total pages
     total_pages = (total + limit - 1) // limit
     
-    # Get the base URL
-    base_url = str(request.url).split('?')[0]
-    
-    # Helper to build the next/prev URLs
-    def make_link(p):
-        if p < 1 or p > total_pages:
-            return None
-        return f"{base_url}?page={p}&limit={limit}"
-
     return {
         "status": "success",
         "page": page,
         "limit": limit,
         "total": total,
         "total_pages": total_pages,
-        "links": {
-            "self": make_link(page),
-            "next": make_link(page + 1),
-            "prev": make_link(page - 1)
-        },
         "data": data
     }
+
+# User is extracted from token (supports Header or Cookie)
+async def get_current_user(
+    authorization: str = Header(None),
+    access_token: str = Cookie(None)
+):
+    token = None
+    
+    # Header is checked first (CLI flow)
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+    # Cookie is checked as fallback (Web flow)
+    elif access_token:
+        token = access_token
+        
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token")
 
 # AUTHENTICATION & SECURITY
 
@@ -451,38 +462,39 @@ async def github_callback(request: Request, code: str = None, state: str = None,
     conn.commit()
     conn.close()
 
-    # Response is prepared with JSON body (for CLI) and HTTP-only cookies (for Web)
-    response = JSONResponse(
-        status_code=200,
-        content={
-            "status": "success",
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "user": {
-                "username": username,
-                "role": role
+    # Response is prepared: JSON for CLI, Redirect for Web
+    if code_verifier:
+        # CLI exchange request (always returns JSON)
+        response = JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "user": {"username": username, "role": role}
             }
-        }
-    )
+        )
+    else:
+        # Web Portal login (Redirects back to UI)
+        response = RedirectResponse(url="http://localhost:5173/dashboard")
     
-    # Access token is stored in a secure, HTTP-only cookie for the Web Portal
+    # Access tokens are stored in secure, HTTP-only cookies for the Web Portal
     response.set_cookie(
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=False,  # Should be True in production (HTTPS)
+        secure=False,  # In production, use True
         samesite="lax",
-        max_age=180    # 3 minutes
+        max_age=3600    # 1 hour
     )
     
-    # Refresh token is stored in a secure, HTTP-only cookie for the Web Portal
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=False,  # Should be True in production (HTTPS)
+        secure=False,
         samesite="lax",
-        max_age=300    # 5 minutes
+        max_age=86400   # 24 hours
     )
     
     return response
@@ -613,29 +625,6 @@ async def logout(request: Request, body: dict):
     except JWTError:
         return error("Invalid or expired refresh token", 401)
 
-# User is extracted from token (supports Header or Cookie)
-async def get_current_user(
-    authorization: str = Header(None),
-    access_token: str = Cookie(None)
-):
-    token = None
-    
-    # Header is checked first (CLI flow)
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ")[1]
-    # Cookie is checked as fallback (Web flow)
-    elif access_token:
-        token = access_token
-        
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing or invalid token")
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if payload.get("type") != "access":
-            raise HTTPException(status_code=401, detail="Invalid token type")
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired access token")
 
 # User admin status is checked
 async def require_admin(current_user: dict = Depends(get_current_user)):
