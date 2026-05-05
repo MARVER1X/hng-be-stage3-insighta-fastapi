@@ -283,12 +283,26 @@ def get_paginated_response(request: Request, data: list, total: int, page: int, 
     # Ceiling division to find total pages
     total_pages = (total + limit - 1) // limit
     
+    # Get the base URL
+    base_url = str(request.url).split('?')[0]
+    
+    # Helper to build the next/prev URLs
+    def make_link(p):
+        if p < 1 or p > total_pages:
+            return None
+        return f"{base_url}?page={p}&limit={limit}"
+
     return {
         "status": "success",
         "page": page,
         "limit": limit,
         "total": total,
         "total_pages": total_pages,
+        "links": {
+            "self": make_link(page),
+            "next": make_link(page + 1),
+            "prev": make_link(page - 1)
+        },
         "data": data
     }
 
