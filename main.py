@@ -30,6 +30,12 @@ GITHUB_REDIRECT_URI = os.getenv("GITHUB_REDIRECT_URI")
 JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
+# Deployment & Security Settings
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+IS_PROD = ENVIRONMENT == "production"
+
+
 app = FastAPI(title="Insighta Labs API")
 
 # Rate Limiter is initialized
@@ -64,7 +70,7 @@ async def log_requests(request: Request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[FRONTEND_URL],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -475,16 +481,16 @@ async def github_callback(request: Request, code: str = None, state: str = None,
             }
         )
     else:
-        # Web Portal login (Redirects back to UI)
-        response = RedirectResponse(url="http://localhost:5173/dashboard")
+        # Web Portal login (Redirects back to UI based on environment)
+        response = RedirectResponse(url=f"{FRONTEND_URL}/dashboard")
     
     # Access tokens are stored in secure, HTTP-only cookies for the Web Portal
     response.set_cookie(
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=False,  # In production, use True
-        samesite="lax",
+        secure=IS_PROD,
+        samesite="none" if IS_PROD else "lax",
         max_age=3600    # 1 hour
     )
     
@@ -492,8 +498,8 @@ async def github_callback(request: Request, code: str = None, state: str = None,
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=IS_PROD,
+        samesite="none" if IS_PROD else "lax",
         max_age=86400   # 24 hours
     )
     
@@ -566,18 +572,18 @@ async def refresh_access_token(request: Request, body: dict):
             key="access_token",
             value=new_access,
             httponly=True,
-            secure=False,
-            samesite="lax",
-            max_age=180
+            secure=IS_PROD,
+            samesite="none" if IS_PROD else "lax",
+            max_age=3600
         )
         
         response.set_cookie(
             key="refresh_token",
             value=new_refresh,
             httponly=True,
-            secure=False,
-            samesite="lax",
-            max_age=300
+            secure=IS_PROD,
+            samesite="none" if IS_PROD else "lax",
+            max_age=86400
         )
         
         return response
@@ -617,9 +623,17 @@ async def logout(request: Request, body: dict):
             content={"status": "success", "message": "Logged out successfully"}
         )
         
-        # Cookies are deleted by setting them to empty with immediate expiry
-        response.delete_cookie("access_token")
-        response.delete_cookie("refresh_token")
+        # Cookies are deleted with environment-specific flags
+        response.delete_cookie(
+            "access_token", 
+            secure=IS_PROD, 
+            samesite="none" if IS_PROD else "lax"
+        )
+        response.delete_cookie(
+            "refresh_token", 
+            secure=IS_PROD, 
+            samesite="none" if IS_PROD else "lax"
+        )
         
         return response
     except JWTError:
