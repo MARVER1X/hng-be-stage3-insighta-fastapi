@@ -36,6 +36,31 @@ The central high-performance REST API powering the Insighta ecosystem. Built wit
 
 ---
 
+## 🛡️ Authentication & Security Architecture
+
+### **Authentication Flow (PKCE)**
+Insighta Labs+ utilizes the **Authorization Code Flow with Proof Key for Code Exchange (PKCE)** to secure multi-interface access.
+1.  **Initiation**: The client (Web or CLI) generates a cryptographically random `code_verifier` and its SHA-256 hash `code_challenge`.
+2.  **Handshake**: The client redirects the user to `/auth/github` with the challenge.
+3.  **Callback**: After GitHub approval, the backend receives the code and verifier, exchanges them for a GitHub token, and issues internal Insighta tokens.
+
+### **Token Handling Approach**
+- **Web Portal**: Implements **Stateless HttpOnly Cookies**. JavaScript cannot access the JWT, neutralizing XSS risks.
+- **CLI**: Stores tokens in `~/.insighta/credentials.json`. It features an auto-refresh middleware that intercepts 401 errors, attempts a refresh, and retries the original request seamlessly.
+
+### **Natural Language Parsing (NLP)**
+The query engine uses a **rule-based extraction approach**:
+1.  **Tokenization**: Input is normalized and split into keywords.
+2.  **Entity Mapping**: Keywords are matched against predefined maps (e.g., "young" -> 16-24, "nigeria" -> NG).
+3.  **Conflict Resolution**: Contradictory filters are ignored to maintain query stability.
+
+### **Role Enforcement Logic**
+Roles are embedded within the JWT (`sub` and `role`). The backend uses a structured dependency-injection pattern:
+- `get_current_user`: Validates token and checks `is_active` status in the DB.
+- `require_admin`: A sub-dependency that enforces `role == "admin"`.
+
+---
+
 ## ♿ Accessibility Expectations Met
 
 - **Predictable JSON Schema** — All error and success responses follow a strict, documented structure for easy parsing by screen-reading dev tools.

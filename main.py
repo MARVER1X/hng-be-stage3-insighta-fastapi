@@ -326,6 +326,16 @@ async def get_current_user(
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
             raise HTTPException(status_code=401, detail="Invalid token type")
+            
+        # Verify user status in the database to allow immediate deactivation
+        user_id = payload.get("sub")
+        conn = get_db()
+        user = conn.execute("SELECT is_active FROM users WHERE id = ?", (user_id,)).fetchone()
+        conn.close()
+        
+        if not user or not user["is_active"]:
+            raise HTTPException(status_code=403, detail="Forbidden: Account is inactive")
+            
         return payload
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired access token")
@@ -469,6 +479,11 @@ async def github_callback(request: Request, code: str = None, state: str = None,
     existing_user = conn.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
     
     if existing_user:
+        # Check if the existing user is still active
+        if not existing_user["is_active"]:
+            conn.close()
+            return error("Access denied: Your account has been deactivated.", 403)
+            
         user_id = existing_user["id"]
         role = existing_user["role"]
         conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (utc_now(), user_id))
