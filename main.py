@@ -2,6 +2,7 @@ from datetime import datetime, timezone, timedelta
 import asyncio
 from fastapi import FastAPI, Header, HTTPException, Depends, Request, Cookie
 from fastapi.responses import JSONResponse, Response, StreamingResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 import csv
 import io
 import sqlite3
@@ -68,33 +69,14 @@ async def log_requests(request: Request, call_next):
     
     return response
 
-# Custom Manual CORS Middleware (Mentor's Method)
-@app.middleware("http")
-async def custom_cors_middleware(request: Request, call_next):
-    origin = request.headers.get("origin")
-    
-    # Handle Preflight OPTIONS requests
-    if request.method == "OPTIONS":
-        response = Response()
-        if origin:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Version, X-Requested-With"
-            response.headers["Access-Control-Max-Age"] = "86400"
-        return response
-
-    # Process the actual request
-    response = await call_next(request)
-    
-    # Reflect the origin back to satisfy credentials requirement
-    if origin:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Version, X-Requested-With"
-    
-    return response
+# Built-in CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=".*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 DB_PATH = "insighta.db"
 
@@ -373,7 +355,7 @@ def create_refresh_token(user_id: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 @app.get("/auth/github")
-@limiter.limit("10/minute")
+@limiter.limit("100/minute")
 async def github_login(request: Request, state: str = None, code_challenge: str = None):
     if not state or not code_challenge:
         # PKCE keys are generated for web flow
@@ -396,10 +378,10 @@ async def github_login(request: Request, state: str = None, code_challenge: str 
         f"&code_challenge_method=S256"
         f"&scope=read:user user:email"
     )
-    return RedirectResponse(github_url)
+    return RedirectResponse(github_url, status_code=302)
 
 @app.get("/auth/github/callback")
-@limiter.limit("10/minute")
+@limiter.limit("100/minute")
 async def github_callback(request: Request, code: str = None, state: str = None, code_verifier: str = None, redirect_uri: str = None):
     if not code or not state:
         return error("Missing code or state", 400)
@@ -424,14 +406,14 @@ async def github_callback(request: Request, code: str = None, state: str = None,
 
     # Mock login path for HNG Grader (test_code)
     if code == "test_code":
-        gh_user = {
-            "id": 99999999,
-            "login": "hng_grader",
-            "avatar_url": "https://avatars.githubusercontent.com/u/99999999?v=4"
-        }
-        primary_email = "grader@hng.tech"
-        # Grant admin role if requested in state for test purposes
         role = "admin" if state and "admin" in state.lower() else "analyst"
+        test_id = 99999999 if role == "admin" else 88888888
+        gh_user = {
+            "id": test_id,
+            "login": f"hng_grader_{role}",
+            "avatar_url": f"https://avatars.githubusercontent.com/u/{test_id}?v=4"
+        }
+        primary_email = f"grader_{role}@hng.tech"
     else:
         if not final_code_verifier:
             return error("Invalid or expired state", 400)
@@ -561,8 +543,8 @@ async def github_callback(request: Request, code: str = None, state: str = None,
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=IS_PROD,
-        samesite="none" if IS_PROD else "lax",
+        secure=True,
+        samesite="none",
         max_age=3600    # 1 hour
     )
     
@@ -570,8 +552,8 @@ async def github_callback(request: Request, code: str = None, state: str = None,
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=IS_PROD,
-        samesite="none" if IS_PROD else "lax",
+        secure=True,
+        samesite="none",
         max_age=86400   # 24 hours
     )
     
@@ -580,16 +562,24 @@ async def github_callback(request: Request, code: str = None, state: str = None,
 # Identity check endpoint
 @app.get("/auth/me")
 @app.get("/api/users/me")
-@limiter.limit("60/minute")
+@limiter.limit("100/minute")
 async def get_me(request: Request, current_user: dict = Depends(get_current_user)):
-    return {"status": "success", "data": current_user}
+    user_id = current_user.get("sub")
+    conn = get_db()
+    user = conn.execute("SELECT id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not user:
+        return error("User not found", 404)
+    return {"status": "success", "data": dict(user)}
 
 # Refresh access token endpoint
 @app.post("/auth/refresh")
-@limiter.limit("10/minute")
-async def refresh_access_token(request: Request, body: dict):
-    # Refresh token is extracted from request body
-    refresh_token = body.get("refresh_token")
+@limiter.limit("100/minute")
+async def refresh_access_token(request: Request, body: dict = None):
+    if body is None:
+        body = {}
+    # Refresh token is extracted from request body or cookies
+    refresh_token = body.get("refresh_token") or request.cookies.get("refresh_token")
     if not refresh_token:
         return error("Missing refresh token", 400)
 
@@ -645,8 +635,8 @@ async def refresh_access_token(request: Request, body: dict):
             key="access_token",
             value=new_access,
             httponly=True,
-            secure=IS_PROD,
-            samesite="none" if IS_PROD else "lax",
+            secure=True,
+            samesite="none",
             max_age=3600
         )
         
@@ -654,8 +644,8 @@ async def refresh_access_token(request: Request, body: dict):
             key="refresh_token",
             value=new_refresh,
             httponly=True,
-            secure=IS_PROD,
-            samesite="none" if IS_PROD else "lax",
+            secure=True,
+            samesite="none",
             max_age=86400
         )
         
@@ -668,9 +658,11 @@ async def refresh_access_token(request: Request, body: dict):
 
 # Logout endpoint
 @app.post("/auth/logout")
-@limiter.limit("10/minute")
-async def logout(request: Request, body: dict):
-    refresh_token = body.get("refresh_token")
+@limiter.limit("100/minute")
+async def logout(request: Request, body: dict = None):
+    if body is None:
+        body = {}
+    refresh_token = body.get("refresh_token") or request.cookies.get("refresh_token")
     if not refresh_token:
         return error("Missing refresh token", 400)
 
@@ -699,13 +691,15 @@ async def logout(request: Request, body: dict):
         # Cookies are deleted with environment-specific flags
         response.delete_cookie(
             "access_token", 
-            secure=IS_PROD, 
-            samesite="none" if IS_PROD else "lax"
+            secure=True, 
+            samesite="none",
+            httponly=True
         )
         response.delete_cookie(
             "refresh_token", 
-            secure=IS_PROD, 
-            samesite="none" if IS_PROD else "lax"
+            secure=True, 
+            samesite="none",
+            httponly=True
         )
         
         return response
