@@ -2,12 +2,15 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # Environments 
 .venv/
 env/
 venv/
 ENV/
+.vscode/
+.venv/
 
 # OS generated files
 .DS_Store
@@ -16,4 +19,5 @@ Thumbs.db
 # Personal/Sensitive Data
 .env
 generate_test_tokens.py
-insighta_postman_collection.json
+insighta_postman_collection.json
+
