@@ -6,7 +6,7 @@ The central high-performance REST API powering the Insighta ecosystem. Built wit
 
 ## 🔗 Live Demo
 
-[View API on Railway](https://your-live-api-url.up.railway.app)
+[View API on Railway](https://web-production-1d564.up.railway.app/)
 
 ---
 
